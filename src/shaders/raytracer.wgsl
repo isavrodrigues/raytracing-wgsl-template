@@ -162,17 +162,39 @@ fn check_ray_collision(r: ray, max: f32) -> hit_record
   var record = hit_record(RAY_TMAX, vec3f(0.0), vec3f(0.0), vec4f(0.0), vec4f(0.0), false, false);
   var closest = record;
 
+  for (var i = 0; i < spheresCount; i = i + 1)
+  {
+    var candidate = record;
+    hit_sphere(spheresb[i].transform.xyz, spheresb[i].transform.w, r, &candidate, min(max, closest.t));
+    if (candidate.hit_anything)
+    {
+      candidate.object_color = spheresb[i].color;
+      candidate.object_material = spheresb[i].material;
+      closest = candidate;
+    }
+  }
+
   return closest;
 }
 
 fn lambertian(normal : vec3f, absorption: f32, random_sphere: vec3f, rng_state: ptr<function, u32>) -> material_behaviour
 {
-  return material_behaviour(true, vec3f(0.0));
+  var direction = normal + random_sphere;
+  if (length(direction) < RAY_TMIN)
+  {
+    direction = normal;
+  }
+  return material_behaviour(true, normalize(direction));
 }
 
 fn metal(normal : vec3f, direction: vec3f, fuzz: f32, random_sphere: vec3f) -> material_behaviour
 {
-  return material_behaviour(false, vec3f(0.0));
+  // R = v - 2(v.n)n  (reflect do WGSL), com um deslocamento aleatório de tamanho `fuzz`
+  let reflected = reflect(normalize(direction), normal);
+  let scattered = normalize(reflected + fuzz * random_sphere);
+
+  // se o raio ficou para dentro da superfície (por causa do fuzz), ele é absorvido
+  return material_behaviour(dot(scattered, normal) > 0.0, scattered);
 }
 
 fn dielectric(normal : vec3f, r_direction: vec3f, refraction_index: f32, frontface: bool, random_sphere: vec3f, fuzz: f32, rng_state: ptr<function, u32>) -> material_behaviour
@@ -198,7 +220,33 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
 
   for (var j = 0; j < maxbounces; j = j + 1)
   {
+    var record = check_ray_collision(r_, RAY_TMAX);
+    if (!record.hit_anything)
+    {
+      light += color * envoriment_color(r_.direction, backgroundcolor1, backgroundcolor2);
+      break;
+    }
 
+    let random_sphere = rng_next_vec3_in_unit_sphere(rng_state);
+    let smoothness = record.object_material.x;
+
+    // smoothness 0 = difuso, 1 = metálico: interpola a direção do novo raio
+    behaviour = lambertian(record.normal, record.object_material.y, random_sphere, rng_state);
+    if (smoothness > 0.0)
+    {
+      // absorption controla o fuzz: 0 = espelho perfeito, maior = mais fosco
+      let metallic = metal(record.normal, r_.direction, record.object_material.y, random_sphere);
+      let new_direction = normalize(mix(behaviour.direction, metallic.direction, smoothness));
+      behaviour = material_behaviour(dot(new_direction, record.normal) > 0.0, new_direction);
+    }
+
+    if (!behaviour.scatter)
+    {
+      break;
+    }
+
+    color *= record.object_color.xyz;
+    r_ = ray(record.p, behaviour.direction);
   }
 
   return light;
@@ -210,12 +258,16 @@ fn render(@builtin(global_invocation_id) id : vec3u)
     var rez = uniforms[1];
     var time = u32(uniforms[0]);
 
+    if (id.x >= u32(rez) || id.y >= u32(rez))
+    {
+        return;
+    }
+
     // init_rng (random number generator) we pass the pixel position, resolution and frame
     var rng_state = init_rng(vec2(id.x, id.y), vec2(u32(rez)), time);
 
     // Get uv
     var fragCoord = vec2f(f32(id.x), f32(id.y));
-    var uv = (fragCoord + sample_square(&rng_state)) / vec2(rez);
 
     // Camera
     var lookfrom = vec3(uniforms[7], uniforms[8], uniforms[9]);
@@ -225,19 +277,28 @@ fn render(@builtin(global_invocation_id) id : vec3u)
     var cam = get_camera(lookfrom, lookat, vec3(0.0, 1.0, 0.0), uniforms[10], 1.0, uniforms[6], uniforms[5]);
     var samples_per_pixel = i32(uniforms[4]);
 
-    var color = vec3(rng_next_float(&rng_state), rng_next_float(&rng_state), rng_next_float(&rng_state));
+    var color = vec3f(0.0);
 
     // Steps:
-    // 1. Loop for each sample per pixel
-    // 2. Get ray
-    // 3. Call trace function
-    // 4. Average the color
+    for (var sample = 0; sample < samples_per_pixel; sample = sample + 1)
+    {
+        var uv = (fragCoord + sample_square(&rng_state)) / vec2f(rez);
+        var ray_ = get_ray(cam, uv, &rng_state);
+        color += trace(ray_, &rng_state);
+    }
+    color /= f32(samples_per_pixel);
 
     var color_out = vec4(linear_to_gamma(color), 1.0);
     var map_fb = mapfb(id.xy, rez);
     
     // 5. Accumulate the color
     var should_accumulate = uniforms[3];
+    if (should_accumulate > 0.0 && time > 0u)
+    {
+        // média móvel: o frame novo pesa pouco, então o ruído vai sendo diluído
+        // (com 0.5 só os últimos ~2 frames contam e a imagem fica chiada)
+        color_out = mix(fb[map_fb], color_out, 0.05);
+    }
 
     // Set the color to the framebuffer
     rtfb[map_fb] = color_out;

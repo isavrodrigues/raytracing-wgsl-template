@@ -1,6 +1,33 @@
 fn hit_sphere(center: vec3f, radius: f32, r: ray, record: ptr<function, hit_record>, max: f32)
 {
+  let oc = r.origin - center;
+  let a = dot(r.direction, r.direction);
+  let half_b = dot(oc, r.direction);
+  let c = dot(oc, oc) - radius * radius;
+  let discriminant = half_b * half_b - a * c;
 
+  if (discriminant < 0.0)
+  {
+    record.hit_anything = false;
+    return;
+  }
+
+  let sqrt_discriminant = sqrt(discriminant);
+  var root = (-half_b - sqrt_discriminant) / a;
+  if (root < RAY_TMIN || root > max)
+  {
+    root = (-half_b + sqrt_discriminant) / a;
+    if (root < RAY_TMIN || root > max)
+    {
+      record.hit_anything = false;
+      return;
+    }
+  }
+
+  record.t = root;
+  record.p = ray_at(r, root);
+  record.normal = (record.p - center) / radius;
+  record.hit_anything = true;
 }
 
 fn hit_quad(r: ray, Q: vec4f, u: vec4f, v: vec4f, record: ptr<function, hit_record>, max: f32)
