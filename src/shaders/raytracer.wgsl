@@ -204,7 +204,9 @@ fn dielectric(normal : vec3f, r_direction: vec3f, refraction_index: f32, frontfa
 
 fn emmisive(color: vec3f, light: f32) -> material_behaviour
 {
-  return material_behaviour(false, vec3f(0.0));
+  // não espalha o raio (scatter = false); usamos o campo direction para devolver
+  // a luz emitida: cor do material multiplicada pela intensidade
+  return material_behaviour(false, color * light);
 }
 
 fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
@@ -227,17 +229,36 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
       break;
     }
 
+    // material emissivo (w = light): soma a luz emitida e termina o caminho do raio
+    let emission = record.object_material.w;
+    if (emission > 0.0)
+    {
+      let emitted = emmisive(record.object_color.xyz, emission);
+      light += color * emitted.direction;
+      break;
+    }
+
     let random_sphere = rng_next_vec3_in_unit_sphere(rng_state);
     let smoothness = record.object_material.x;
 
     // smoothness 0 = difuso, 1 = metálico: interpola a direção do novo raio
+    let specular = record.object_material.z;
+    var surface_color = record.object_color.xyz;
+
     behaviour = lambertian(record.normal, record.object_material.y, random_sphere, rng_state);
-    if (smoothness > 0.0)
+
+    // specular = probabilidade deste raio refletir de forma especular (metal_reflect)
+    // em vez de espalhar de forma difusa (lambertiano)
+    if (smoothness > 0.0 && rng_next_float(rng_state) < specular)
     {
       // absorption controla o fuzz: 0 = espelho perfeito, maior = mais fosco
       let metallic = metal(record.normal, r_.direction, record.object_material.y, random_sphere);
-      let new_direction = normalize(mix(behaviour.direction, metallic.direction, smoothness));
-      behaviour = material_behaviour(dot(new_direction, record.normal) > 0.0, new_direction);
+      let metal_reflect = normalize(mix(behaviour.direction, metallic.direction, smoothness));
+      behaviour = material_behaviour(dot(metal_reflect, record.normal) > 0.0, metal_reflect);
+
+      // reflexo especular de material pouco liso é branco (como o brilho do tomate);
+      // quanto mais metálico, mais ele é tingido pela cor do objeto
+      surface_color = mix(vec3f(1.0), surface_color, smoothness);
     }
 
     if (!behaviour.scatter)
@@ -245,7 +266,7 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
       break;
     }
 
-    color *= record.object_color.xyz;
+    color *= surface_color;
     r_ = ray(record.p, behaviour.direction);
   }
 
