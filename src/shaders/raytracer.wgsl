@@ -174,6 +174,30 @@ fn check_ray_collision(r: ray, max: f32) -> hit_record
     }
   }
 
+  for (var i = 0; i < quadsCount; i = i + 1)
+  {
+    var candidate = record;
+    hit_quad(r, quadsb[i].Q, quadsb[i].u, quadsb[i].v, &candidate, min(max, closest.t));
+    if (candidate.hit_anything)
+    {
+      candidate.object_color = quadsb[i].color;
+      candidate.object_material = quadsb[i].material;
+      closest = candidate;
+    }
+  }
+
+  for (var i = 0; i < boxesCount; i = i + 1)
+  {
+    var candidate = record;
+    hit_box(r, boxesb[i].center.xyz, boxesb[i].radius.xyz, &candidate, min(max, closest.t));
+    if (candidate.hit_anything)
+    {
+      candidate.object_color = boxesb[i].color;
+      candidate.object_material = boxesb[i].material;
+      closest = candidate;
+    }
+  }
+
   return closest;
 }
 
