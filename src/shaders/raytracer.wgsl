@@ -198,8 +198,34 @@ fn metal(normal : vec3f, direction: vec3f, fuzz: f32, random_sphere: vec3f) -> m
 }
 
 fn dielectric(normal : vec3f, r_direction: vec3f, refraction_index: f32, frontface: bool, random_sphere: vec3f, fuzz: f32, rng_state: ptr<function, u32>) -> material_behaviour
-{  
-  return material_behaviour(false, vec3f(0.0));
+{
+  // razão entre os índices: entrando (frontface) = 1/n, saindo = n
+  let n = max(refraction_index, 0.01);
+  let ratio = select(n, 1.0 / n, frontface);
+
+  let unit_direction = normalize(r_direction);
+  let cos_theta = min(dot(-unit_direction, normal), 1.0);
+  let sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
+
+  // Snell: se ratio * sin(theta) > 1 não existe raio refratado (reflexão interna total)
+  let cannot_refract = ratio * sin_theta > 1.0;
+
+  // aproximação de Schlick: probabilidade de refletir em vez de refratar
+  var r0 = (1.0 - ratio) / (1.0 + ratio);
+  r0 = r0 * r0;
+  let reflectance = r0 + (1.0 - r0) * pow(1.0 - cos_theta, 5.0);
+
+  var direction = vec3f(0.0);
+  if (cannot_refract || reflectance > rng_next_float(rng_state))
+  {
+    direction = reflect(unit_direction, normal);
+  }
+  else
+  {
+    direction = refract(unit_direction, normal, ratio);
+  }
+
+  return material_behaviour(true, normalize(direction + fuzz * random_sphere));
 }
 
 fn emmisive(color: vec3f, light: f32) -> material_behaviour
@@ -249,7 +275,12 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
 
     // specular = probabilidade deste raio refletir de forma especular (metal_reflect)
     // em vez de espalhar de forma difusa (lambertiano)
-    if (smoothness > 0.0 && rng_next_float(rng_state) < specular)
+    if (smoothness < 0.0)
+    {
+      // smoothness < 0 = dielétrico (vidro). specular = índice de refração, absorption = fuzz
+      behaviour = dielectric(record.normal, r_.direction, specular, record.frontface, random_sphere, record.object_material.y, rng_state);
+    }
+    else if (smoothness > 0.0 && rng_next_float(rng_state) < specular)
     {
       // absorption controla o fuzz: 0 = espelho perfeito, maior = mais fosco
       let metallic = metal(record.normal, r_.direction, record.object_material.y, random_sphere);
@@ -309,19 +340,18 @@ fn render(@builtin(global_invocation_id) id : vec3u)
     }
     color /= f32(samples_per_pixel);
 
-    var color_out = vec4(linear_to_gamma(color), 1.0);
     var map_fb = mapfb(id.xy, rez);
-    
-    // 5. Accumulate the color
-    var should_accumulate = uniforms[3];
-    if (should_accumulate > 0.0 && time > 0u)
-    {
-        // média móvel: o frame novo pesa pouco, então o ruído vai sendo diluído
-        // (com 0.5 só os últimos ~2 frames contam e a imagem fica chiada)
-        color_out = mix(fb[map_fb], color_out, 0.05);
-    }
 
-    // Set the color to the framebuffer
-    rtfb[map_fb] = color_out;
-    fb[map_fb] = color_out;
+    // 5. Accumulate the color
+    // rtfb guarda a SOMA dos frames (em espaço linear) e, no canal w, quantos frames somamos.
+    // should_accumulate = 0 (câmera/cena mudou) zera a soma e recomeça a contagem.
+    var should_accumulate = uniforms[3];
+    var previous = rtfb[map_fb];
+    var accumulated_color = previous.xyz * should_accumulate + color;
+    var weight = previous.w * should_accumulate + 1.0;
+
+    rtfb[map_fb] = vec4(accumulated_color, weight);
+
+    // Na tela: média dos frames, e só então a correção gama
+    fb[map_fb] = vec4(linear_to_gamma(accumulated_color / weight), 1.0);
 }

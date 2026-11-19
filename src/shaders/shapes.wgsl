@@ -26,7 +26,10 @@ fn hit_sphere(center: vec3f, radius: f32, r: ray, record: ptr<function, hit_reco
 
   record.t = root;
   record.p = ray_at(r, root);
-  record.normal = (record.p - center) / radius;
+  // a normal sempre aponta contra o raio; frontface diz se o raio veio de fora
+  let outward_normal = (record.p - center) / radius;
+  record.frontface = dot(r.direction, outward_normal) < 0.0;
+  record.normal = select(-outward_normal, outward_normal, record.frontface);
   record.hit_anything = true;
 }
 
