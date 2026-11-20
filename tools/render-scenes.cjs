@@ -3,8 +3,9 @@
  * render-scenes.cjs - headless render verification for the WebGPU ray tracer.
  *
  * Opens the project in headless Chromium (WebGPU on SwiftShader, i.e. on the CPU), selects each scene in the
- * lil-gui "Scene" dropdown, lets `--frames` accumulated frames render, screenshots the <canvas> and reports
- * console errors / WGSL compile errors / uncaught exceptions per scene.
+ * lil-gui "Scene" dropdown, lets `--frames` accumulated frames render, reads the final image back (PNG) and reports
+ * console errors / WGSL compile errors (with file:line) / uncaught exceptions per scene.
+ * Outputs in --out: <Scene>.png, montage.png (all scenes in one image, dropdown order, 6 columns), index.html.
  *
  * USAGE
  *   node tools/render-scenes.cjs [--scenes Basic,Bunny] [--rez 256] [--frames 12] [--out tools/out]
@@ -18,6 +19,7 @@
  *   --timeout  seconds to wait per scene before giving up (default 120).
  *   --port     local http port (default 0 = random free port).
  *   --verbose  also print every console message of every scene.
+ *   env HARNESS_TRACE=1  prints the frame/accumulation bookkeeping every 100 ms (debugging the wait loop).
  *
  * EXIT CODE  0 = every scene rendered without errors, 1 = at least one scene had errors / timed out / init failed.
  *
@@ -31,8 +33,18 @@
  *     the uniforms buffer in main.js/raytracer.wgsl: uniforms[1] = rez, uniforms[3] = shouldAccumulate, and that
  *     getScene() calls writeUniforms() once more than a normal frame does. If you change that, the wait loop
  *     will time out (the error message says so).
- *   - createShaderModule is wrapped so that WGSL compile messages are printed with `file:line` (main.js'
- *     getModule() itself throws `ReferenceError: file is not defined` and hides the real message).
+ *   - createShaderModule is wrapped so that WGSL compile messages are printed with `file:line:col` (the file list is
+ *     parsed from the getModule(gpu, [...]) call in main.js).
+ *
+ * TWO HARNESS-ONLY WORKAROUNDS (neither touches the project files; both are monkey-patches in INIT_SCRIPT)
+ *   1. Canvas: in this container (headless Chrome 153 + SwiftShader) GPUCanvasContext.getCurrentTexture() breaks
+ *      Dawn ("A valid external Instance reference no longer exists" -> onSubmittedWorkDone() rejects -> render loop
+ *      dies). main.js therefore renders into an offscreen texture and the harness reads that back. Output pixels are
+ *      identical to what the canvas would show (same render pipeline), only the compositor is bypassed.
+ *   2. Accumulation: SwiftShader frames take 0.1 - 1.7 s, far more than the 400 ms accumulation-reset timer in
+ *      main.js, so a new scene would be summed on top of the previous scene's image. The first frame after each scene
+ *      load is forced to shouldAccumulate = 0, like on a fast GPU. (Without this, images are contaminated.)
+ *   Typical run: ~2 min for all scenes at --rez 256 --frames 12; single simple scene ~3 s.
  */
 'use strict';
 
@@ -151,12 +163,18 @@ const INIT_SCRIPT = `(() => {
   q.writeBuffer = function (buffer, offset, data, ...rest) {
     // the uniforms buffer: small Float32Array, written at offset 0, uniforms[1] == rez
     if (offset === 0 && data instanceof Float32Array && data.length <= 64 && data[1] === h.rez) {
+      // A uniforms write while another one is already pending = the per-frame write right after getScene()'s
+      // explicit writeUniforms(). main.js asks for an accumulation reset (400 ms timer), but on SwiftShader one frame
+      // takes >400 ms, so the timer has already flipped shouldAccumulate back to 1 and the new scene would be summed
+      // on top of the previous scene's image. Force the reset here, as a fast GPU would have done.
+      if (h.writesSinceSubmit >= 1) data[3] = 0;
       h.uniformWrites++; h.writesSinceSubmit++; h.lastAccum = data[3];
     }
     return wb.call(this, buffer, offset, data, ...rest);
   };
   const sub = q.submit;
   q.submit = function (...a) {
+    if (h.ignoreSubmit) return sub.apply(this, a);
     h.submits++;
     // getScene() calls writeUniforms() on top of the per-frame one -> two writes between two submits
     if (h.writesSinceSubmit >= 2) h.sceneLoads++;
@@ -174,6 +192,42 @@ const INIT_SCRIPT = `(() => {
         console.error('__WGSL__' + JSON.stringify({ kind: isCompute ? 'main' : 'other', type: msg.type, line: msg.lineNum, col: msg.linePos, message: msg.message }));
     });
     return m;
+  };
+  // --- canvas workaround -------------------------------------------------------------------------------
+  // In this container (headless Chrome + SwiftShader) calling GPUCanvasContext.getCurrentTexture() kills Dawn's
+  // instance ("A valid external Instance reference no longer exists") and every later onSubmittedWorkDone()
+  // rejects, so main.js' render loop dies after the first frame. We therefore hand main.js an OFFSCREEN texture
+  // instead of the canvas texture and read the finished image back ourselves (window.__readCanvas).
+  GPUCanvasContext.prototype.configure = function (conf) { this.__conf = conf; };
+  GPUCanvasContext.prototype.getCurrentTexture = function () {
+    const conf = this.__conf;
+    if (!conf) throw new DOMException('context is not configured', 'InvalidStateError');
+    const c = this.canvas;
+    if (!this.__tex) {
+      this.__tex = conf.device.createTexture({ size: [c.width, c.height], format: conf.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+      h.canvasTex = this.__tex; h.canvasDev = conf.device;
+    }
+    return this.__tex;
+  };
+  window.__readCanvas = async () => {
+    const tex = h.canvasTex, dev = h.canvasDev;
+    if (!tex) throw new Error('no canvas texture was ever requested (render loop never ran?)');
+    const w = tex.width, ht = tex.height, bpr = Math.ceil(w * 4 / 256) * 256;
+    const buf = dev.createBuffer({ size: bpr * ht, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = dev.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: bpr }, [w, ht]);
+    h.ignoreSubmit = true; dev.queue.submit([enc.finish()]); h.ignoreSubmit = false;
+    await buf.mapAsync(GPUMapMode.READ);
+    const src = new Uint8Array(buf.getMappedRange());
+    const bgra = tex.format.startsWith('bgra');
+    const out = new Uint8Array(w * ht * 4);
+    for (let y = 0; y < ht; y++) for (let x = 0; x < w; x++) {
+      const s = y * bpr + x * 4, d = (y * w + x) * 4;
+      out[d] = src[s + (bgra ? 2 : 0)]; out[d + 1] = src[s + 1]; out[d + 2] = src[s + (bgra ? 0 : 2)]; out[d + 3] = 255;
+    }
+    buf.unmap(); buf.destroy();
+    let bin = ''; for (let i = 0; i < out.length; i += 0x8000) bin += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+    return { width: w, height: ht, b64: btoa(bin) };
   };
   const rd = GPUAdapter.prototype.requestDevice;
   GPUAdapter.prototype.requestDevice = async function (...a) {
@@ -194,7 +248,7 @@ function pngStats(buf)
         for (let c = 0; c < 3; c++) { const v = png.data[i * 4 + c]; sum[c] += v; sq[c] += v * v; }
     const mean = sum.map(s => s / n);
     const std = sq.map((s, c) => Math.sqrt(Math.max(0, s / n - mean[c] * mean[c])));
-    return { width: png.width, height: png.height, mean, std, hash: crypto.createHash('md5').update(png.data).digest('hex') };
+    return { width: png.width, height: png.height, mean, std, hash: crypto.createHash('md5').update(png.data).digest('hex'), img: png };
 }
 
 const fmt = v => v.map(x => x.toFixed(1)).join(',');
@@ -319,7 +373,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
             let errorSeenAt = null;
             while (Date.now() < deadline)
             {
-                const st = await page.evaluate(() => ({ loads: window.__h.sceneLoads, run: window.__h.run, resets: window.__h.resets }));
+                const st = await page.evaluate(() => ({ loads: window.__h.sceneLoads, run: window.__h.run, resets: window.__h.resets, submits: window.__h.submits }));
+                if (process.env.HARNESS_TRACE) console.log(`   [trace ${t.name}] +${Date.now() - started}ms loads=${st.loads}(before ${loadsBefore}) run=${st.run} resets=${st.resets} submits=${st.submits}`);
                 if (st.loads > loadsBefore && reachedAt === null) reachedAt = Date.now();
                 if (st.loads > loadsBefore && st.run >= args.frames) { status = 'ok'; break; }
                 if (bucket.errors.length && errorSeenAt === null) errorSeenAt = Date.now();
@@ -338,11 +393,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
             }
             else res.msPerFrame = Math.round(elapsed / (args.frames + 1));
 
-            // screenshot even on failure (shows what the user would see)
+            // image even on failure (shows what the user would see); read back from the offscreen canvas texture
             const png = path.join(args.out, `${t.name}.png`);
             try
             {
-                const buf = await page.locator('canvas').first().screenshot({ path: png });
+                const img = await page.evaluate(() => window.__readCanvas());
+                const out = new PNG({ width: img.width, height: img.height });
+                Buffer.from(img.b64, 'base64').copy(out.data);
+                const buf = PNG.sync.write(out);
+                fs.writeFileSync(png, buf);
                 res.png = path.basename(png);
                 res.stats = pngStats(buf);
                 const s = res.stats;
@@ -375,6 +434,19 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     {
         console.log('errors during init:');
         for (const e of initErrors) console.log(`        ERROR ${e}`);
+    }
+
+    // ---------------------------------------------------------------------- montage.png (all scenes in one image)
+    // scene order = dropdown order, row-major, 6 columns. Names are listed in index.html / the console log.
+    const withImg = results.filter(r => r.stats);
+    if (withImg.length)
+    {
+        const cols = Math.min(6, withImg.length), rows = Math.ceil(withImg.length / cols), w = withImg[0].stats.width, h = withImg[0].stats.height;
+        const sheet = new PNG({ width: cols * w, height: rows * h });
+        sheet.data.fill(0);
+        withImg.forEach((r, i) => PNG.bitblt(r.stats.img, sheet, 0, 0, w, h, (i % cols) * w, Math.floor(i / cols) * h));
+        fs.writeFileSync(path.join(args.out, 'montage.png'), PNG.sync.write(sheet));
+        console.log(`montage.png (${cols}x${rows}, row-major): ${withImg.map(r => r.name).join(', ')}`);
     }
 
     // -------------------------------------------------------------------------------- contact sheet
