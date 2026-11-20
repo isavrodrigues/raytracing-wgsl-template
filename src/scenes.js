@@ -1,5 +1,8 @@
-import { Sphere, Quad, Box, Mesh } from './objects.js';
-import { loadMesh, getObjBoundingBox, getSpheresRandom } from './util.js';
+import { Sphere, Quad, Box, Cylinder, Mesh } from './objects.js';
+import { loadMesh, loadMeshes, getObjBoundingBox, getSpheresRandom } from './util.js';
+
+// ATENCAO: a lista de cenas do GUI e montada lendo este arquivo como texto (crateAllScenesList em util.js),
+// entao aqui so podem existir as cenas (async + nome da cena) e getAvailableScene. Helpers vao em util.js.
 
 const groundDefault = new Sphere([0, -1001, 0], [0.7, 0.7, 0.7], 1000, [0.9, 0.0, 0.6, 0.0]);
 
@@ -24,6 +27,7 @@ async function Spheres(numSpheres = 4)
         spheres, 
         quads: [], 
         boxes: [], 
+        cylinders: [],
         triangles: [], 
         meshes: [], 
         backgroundColor1: [0.0, 0.5, 1.0], 
@@ -44,6 +48,7 @@ async function Night()
         spheres,
         quads,
         boxes,
+        cylinders: [],
         triangles,
         meshes,
         backgroundColor1: [0.0, 0.0, 0.0],
@@ -67,6 +72,7 @@ async function Basic()
         spheres, 
         quads: [], 
         boxes: [], 
+        cylinders: [],
         triangles: [], 
         meshes: [], 
         backgroundColor1: [0.0, 0.5, 1.0], 
@@ -99,6 +105,7 @@ async function Metal()
 		spheres : spheres,
 		quads : quads,
 		boxes : boxes,
+		cylinders: [],
 		triangles: [],
 		meshes: [],
 		backgroundColor1 : [0, 0.5, 1],
@@ -130,6 +137,7 @@ async function Fuzz()
 		spheres : spheres,
 		quads : quads,
 		boxes : boxes,
+		cylinders: [],
 		triangles: [],
 		meshes: [],
 		backgroundColor1 : [0, 0.3803921568627451, 0.7607843137254902],
@@ -162,6 +170,7 @@ async function Specular()
 		spheres : spheres,
 		quads : quads,
 		boxes : boxes,
+		cylinders: [],
 		triangles: [],
 		meshes: [],
 		backgroundColor1 : [0, 0, 0],
@@ -186,6 +195,7 @@ async function Emissive()
         spheres, 
         quads: [], 
         boxes: [], 
+        cylinders: [],
         triangles: [], 
         meshes: [], 
         backgroundColor1: [0.0, 0.0, 0.0], 
@@ -211,6 +221,7 @@ async function Dielectric()
         spheres, 
         quads: [], 
         boxes: [], 
+        cylinders: [],
         triangles: [], 
         meshes: [], 
         backgroundColor1: [0.0, 0.5, 1.0], 
@@ -242,6 +253,7 @@ async function Cubes()
 		spheres : spheres,
 		quads : quads,
 		boxes : boxes,
+		cylinders: [],
 		triangles: [],
 		meshes: [],
 		backgroundColor1 : [0, 0.5, 1],
@@ -286,6 +298,7 @@ async function Cornell()
 		spheres : spheres,
 		quads : quads,
 		boxes : boxes,
+		cylinders: [],
 		triangles: [],
 		meshes: [],
 		backgroundColor1 : [0, 0, 0],
@@ -329,6 +342,7 @@ async function Mirror()
 		spheres : spheres,
 		quads : quads,
 		boxes : boxes,
+		cylinders: [],
 		triangles: [],
 		meshes: [],
 		backgroundColor1 : [0, 0, 0],
@@ -371,6 +385,7 @@ async function Infinite()
 		spheres : spheres,
 		quads : quads,
 		boxes : boxes,
+		cylinders: [],
 		triangles: [],
 		meshes: [],
 		backgroundColor1 : [0, 0, 0],
@@ -399,6 +414,7 @@ async function Bunny()
         spheres, 
         quads: [], 
         boxes: [], 
+        cylinders: [],
         triangles, 
         meshes, 
         backgroundColor1: [0.0, 0.5, 1.0], 
@@ -411,7 +427,7 @@ async function Bunny()
     };
 }
 
-async function Suzzanne()
+async function Suzanne()
 {
     let { verticesMesh, trianglesMesh, triangles } = await loadMesh('./media/suzanne.obj');
     let meshes = [new Mesh([0, 0.0, -6], [2, 2, 2], [0, 0, 0], [0.6, 0.3, 0.7, 1.0], [0.0, 0.0, 0.0, 0.0], 0, 0, triangles.length)];
@@ -422,6 +438,7 @@ async function Suzzanne()
         spheres: [], 
         quads: [], 
         boxes: [], 
+        cylinders: [],
         triangles, 
         meshes, 
         backgroundColor1: [0.0, 0.5, 1.0], 
@@ -461,6 +478,7 @@ async function Rotation()
 		spheres : spheres,
 		quads : quads,
 		boxes : boxes,
+		cylinders: [],
 		triangles: triangles,
 		meshes: meshes,
 		backgroundColor1 : [1, 1, 1],
@@ -494,6 +512,7 @@ async function Everything()
         spheres: spheres, 
         quads: [], 
         boxes: boxes, 
+        cylinders: [],
         triangles: triangles, 
         meshes: meshes,
         backgroundColor1: [0.0, 0.5, 1.0], 
@@ -504,6 +523,113 @@ async function Everything()
         samplesPerPixel: 1.0,
         maxBounces: 10.0
     };
+}
+
+// Vitrine do novo primitivo (cilindro): em pe, deitado, inclinado, de frente para a camera;
+// materiais difuso, metal, vidro (smoothness -1, specular = indice de refracao) e emissivo.
+async function Cylinders()
+{
+	let spheres = [
+		groundDefault,
+		new Sphere([1.6, -0.7, -2.5], [0.9, 0.3, 0.3], 0.3, [0, 0, 0, 0]),
+	];
+
+	let cylinders = [
+		// em pe, difuso
+		new Cylinder([-2.4, -0.2, -4.3], [0.85, 0.2, 0.2], [0, 0, 0], [0.5, 0.8], [0, 0, 0, 0]),
+		// em pe, metal dourado
+		new Cylinder([-1.0, 0.0, -4.6], [1.0, 0.8, 0.35], [0, 0, 0], [0.35, 1.0], [1, 0.05, 1, 0]),
+		// deitado (eixo ao longo de X), difuso
+		new Cylinder([-0.2, -0.7, -2.9], [0.2, 0.8, 0.7], [0, 0, 1.5708], [0.3, 0.8], [0, 0, 0, 0]),
+		// vidro (indice de refracao 1.5)
+		new Cylinder([1.2, -0.45, -3.4], [1, 1, 1], [0, 0, 0], [0.4, 0.55], [-1, 0, 1.5, 0]),
+		// haste emissiva inclinada, flutuando
+		new Cylinder([0.3, 1.4, -4.0], [1.0, 0.85, 0.55], [0, 0, 0.7], [0.1, 1.1], [0, 0, 0, 5]),
+		// "roda" de frente para a camera (eixo ao longo de Z), brilhante
+		new Cylinder([2.5, -0.5, -4.5], [0.55, 0.3, 0.85], [1.5708, 0, 0], [0.5, 0.25], [0.3, 0.1, 0.4, 0]),
+		// inclinado, apoiado na borda da tampa
+		new Cylinder([-1.8, -0.38, -2.8], [0.25, 0.4, 0.9], [0, 0, 0.5], [0.2, 0.6], [0.5, 0, 0.3, 0]),
+	];
+
+	return {
+		spheres : spheres,
+		quads : [],
+		boxes : [],
+		cylinders : cylinders,
+		triangles: [],
+		meshes: [],
+		backgroundColor1 : [0, 0.5, 1],
+		backgroundColor2 : [1, 1, 1],
+		focusDistance: 5,
+		focusAngle: 0,
+		sunIntensity: 1,
+		samplesPerPixel: 1,
+		maxBounces: 12
+	};
+}
+
+// Cena nova (B+): "galeria" ao entardecer com tudo junto: coelho em um pedestal redondo e Suzanne dourada
+// em uma coluna (duas malhas no mesmo buffer de triangulos), esfera de vidro, esfera cromada, caixa
+// rotacionada, poste de luz quente e um painel espelhado ao fundo.
+async function Gallery()
+{
+	let { triangles, ranges } = await loadMeshes(['./media/stanford-bunny.obj', './media/suzanne.obj']);
+
+	// coelho (base do modelo em y ~ 0) em cima do pedestal, virado um pouco para a camera
+	let bunny = new Mesh([-1.5, -0.8, -4.0], [1.4, 1.4, 1.4], [0, 0.5, 0], [0.95, 0.6, 0.5, 1.0], [0.35, 0, 0.45, 0], 0, ranges[0].start, ranges[0].end);
+	bunny.setBoundingBox(ranges[0].min, ranges[0].max);
+
+	// Suzanne (centrada na origem) sobre a coluna, espelho dourado levemente fosco
+	let suzanne = new Mesh([1.5, 0.65, -4.0], [0.7, 0.7, 0.7], [0, -0.5, 0], [1.0, 0.78, 0.35, 1.0], [1, 0.05, 0.9, 0], 0, ranges[1].start, ranges[1].end);
+	suzanne.setBoundingBox(ranges[1].min, ranges[1].max);
+
+	let spheres = [
+		// chao arenoso levemente brilhante
+		new Sphere([0, -1001, 0], [0.72, 0.55, 0.42], 1000, [0.7, 0, 0.25, 0]),
+		// vidro no centro
+		new Sphere([-0.1, -0.6, -2.8], [1, 1, 1], 0.4, [-1, 0, 1.5, 0]),
+		// esfera cromada
+		new Sphere([2.4, -0.7, -2.6], [0.9, 0.9, 0.95], 0.3, [1, 0, 1, 0]),
+		// lampada quente no chao
+		new Sphere([-0.75, -0.78, -2.0], [1.0, 0.75, 0.4], 0.22, [0, 0, 0, 4]),
+		// luminaria no alto do poste
+		new Sphere([-3.8, 1.0, -5.0], [1.0, 0.8, 0.5], 0.3, [0, 0, 0, 5]),
+	];
+
+	let quads = [
+		// painel espelhado ao fundo (normal para +Z, de frente para a camera)
+		new Quad([-4, -1, -7.5, 0], [8, 0, 0, 0], [0, 4, 0, 0], [0.92, 0.95, 1.0, 1], [1, 0.01, 1, 0]),
+	];
+
+	let boxes = [
+		// cubo rotacionado azul laqueado
+		new Box([0.9, -0.62, -2.5, 0], [0.25, 0.45, 0.85], [0, 0.7, 0, 0], [0.38, 0.38, 0.38, 0], [0.5, 0, 0.3, 0]),
+	];
+
+	let cylinders = [
+		// pedestal do coelho
+		new Cylinder([-1.5, -0.9, -4.0], [0.85, 0.85, 0.8], [0, 0, 0], [1.3, 0.1], [0.3, 0, 0.2, 0]),
+		// coluna da Suzanne
+		new Cylinder([1.5, -0.5, -4.0], [0.9, 0.88, 0.82], [0, 0, 0], [0.8, 0.5], [0.3, 0, 0.2, 0]),
+		// poste de luz
+		new Cylinder([-3.8, -0.1, -5.0], [0.15, 0.15, 0.18], [0, 0, 0], [0.25, 0.9], [1, 0.1, 0.6, 0]),
+	];
+
+	return {
+		spheres : spheres,
+		quads : quads,
+		boxes : boxes,
+		cylinders : cylinders,
+		triangles: triangles,
+		meshes: [bunny, suzanne],
+		backgroundColor1 : [1.0, 0.72, 0.5],
+		backgroundColor2 : [0.3, 0.4, 0.75],
+		focusDistance: 4,
+		focusAngle: 0,
+		sunIntensity: 1,
+		samplesPerPixel: 2,
+		maxBounces: 12
+	};
 }
 
 export { getAvailableScene };

@@ -1,9 +1,42 @@
 import { Sphere, Triangle } from './objects.js';
 
+// buffers de storage usados pelo kernel: fb, rtfb, uniforms, spheres, quads, boxes, triangles, meshes, cylinders
+const REQUIRED_STORAGE_BUFFERS = 9;
+
+function fatal(message)
+{
+    console.error(message);
+    if (typeof alert === "function")
+    {
+        alert(message);
+    }
+
+    throw new Error(message);
+}
+
 async function getGPU()
 {
+    if (!navigator.gpu)
+    {
+        fatal("WebGPU nao esta disponivel neste navegador. Use um Chrome/Edge recente com WebGPU habilitado.");
+    }
+
     var adapter = await navigator.gpu.requestAdapter();
-    var gpu = await adapter.requestDevice();
+    if (!adapter)
+    {
+        fatal("Nenhum adaptador WebGPU encontrado (GPU indisponivel ou bloqueada).");
+    }
+
+    // o limite padrao e 8 buffers de storage por estagio; precisamos de 9
+    var supported = adapter.limits.maxStorageBuffersPerShaderStage;
+    if (supported < REQUIRED_STORAGE_BUFFERS)
+    {
+        fatal(`Este adaptador WebGPU suporta apenas ${supported} storage buffers por shader (precisamos de ${REQUIRED_STORAGE_BUFFERS}).`);
+    }
+
+    var gpu = await adapter.requestDevice({
+        requiredLimits: { maxStorageBuffersPerShaderStage: Math.min(supported, 12) },
+    });
 
     return {adapter, gpu};
 }
@@ -75,23 +108,53 @@ async function load(file)
 
 async function getModule(gpu, paths)
 {
+    // os arquivos sao concatenados num unico modulo; guardamos onde cada um comeca
+    // para traduzir o numero da linha do erro de volta para (arquivo, linha)
     var code = "";
+    var sources = [];
+    var cursor = 1;
     for (let path of paths)
     {
-        code += await load(path) + "\n";
+        let text = await load(path);
+        sources.push({ path, start: cursor });
+        cursor += text.split("\n").length;
+        code += text + "\n";
     }
+
+    var locate = (lineNum) => {
+        let source = sources[0];
+        for (let s of sources)
+        {
+            if (s.start <= lineNum)
+            {
+                source = s;
+            }
+        }
+
+        return `${source.path}:${lineNum - source.start + 1}`;
+    };
 
     var module = gpu.createShaderModule({ code });
     var info = await module.getCompilationInfo();
 
-    if (info.messages.length > 0)
+    var errors = 0;
+    for (let message of info.messages)
     {
-        for (let message of info.messages)
+        let text = `[WGSL ${message.type}] ${message.message} (${locate(message.lineNum)})`;
+        if (message.type === "error")
         {
-            console.warn(`${message.message} at ${file} line ${message.lineNum}`);
+            errors++;
+            console.error(text);
         }
+        else
+        {
+            console.warn(text);
+        }
+    }
 
-        throw new Error(`Could not compile ${file}`);
+    if (errors > 0)
+    {
+        throw new Error(`Could not compile shaders: ${errors} error(s), see console.`);
     }
 
     return module;
@@ -206,25 +269,47 @@ async function readObj(file)
     let vertices = [];
     let triangles = [];
     let fileContents = await load(file);
-    let lines = fileContents.split("\n");
+    let lines = fileContents.split(/\r?\n/);
 
     for (let line of lines)
     {
-        let parts = line.split(" ");
+        // separa por qualquer quantidade de espacos/tabs (ignora linhas vazias e comentarios)
+        let parts = line.trim().split(/\s+/);
+
         if (parts[0] == "v")
         {
-            vertices.push([parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]), 0.0]);
-        }
+            let x = parseFloat(parts[1]);
+            let y = parseFloat(parts[2]);
+            let z = parseFloat(parts[3]);
 
-        if (parts[0] == "f")
+            if (Number.isNaN(x) || Number.isNaN(y) || Number.isNaN(z))
+            {
+                continue;
+            }
+
+            vertices.push([x, y, z, 0.0]);
+        }
+        else if (parts[0] == "f")
         {
+            // cada token pode ser "v", "v/vt", "v//vn" ou "v/vt/vn": so o primeiro numero importa.
+            // indices negativos sao relativos ao fim da lista de vertices lida ate agora.
             let face = [];
             for (let i = 1; i < parts.length; i++)
             {
-                face.push(parseInt(parseInt(parts[i]) - 1));
+                let index = parseInt(parts[i].split("/")[0], 10);
+                if (Number.isNaN(index) || index == 0)
+                {
+                    continue;
+                }
+
+                face.push(index < 0 ? vertices.length + index : index - 1);
             }
-            
-            triangles.push(face);
+
+            // descarta faces degeneradas ou que apontam para vertices inexistentes
+            if (face.length >= 3 && face.every(index => index >= 0 && index < vertices.length))
+            {
+                triangles.push(face);
+            }
         }
     }
 
@@ -236,24 +321,36 @@ async function loadMesh(file)
     let { vertices: verticesMesh, triangles: trianglesMesh } = await readObj(file);
     let triangles = [];
 
-    for (let i = 0; i < trianglesMesh.length; i ++)
+    // triangulacao em leque: uma face (v0, v1, ..., vn) vira (v0, vi, vi+1)
+    for (let face of trianglesMesh)
     {
-        let A = verticesMesh[trianglesMesh[i][0]];
-        let B = verticesMesh[trianglesMesh[i][1]];
-        let C = verticesMesh[trianglesMesh[i][2]];
-        triangles.push(new Triangle(A, B, C));
-    
-        if (trianglesMesh[i].length == 4)
+        for (let i = 1; i < face.length - 1; i++)
         {
-            A = verticesMesh[trianglesMesh[i][0]];
-            B = verticesMesh[trianglesMesh[i][2]];
-            C = verticesMesh[trianglesMesh[i][3]];
-    
-            triangles.push(new Triangle(A, B, C));
+            triangles.push(new Triangle(verticesMesh[face[0]], verticesMesh[face[i]], verticesMesh[face[i + 1]]));
         }
     }
 
     return { verticesMesh, trianglesMesh, triangles };
+}
+
+// Carrega varios .obj para UM unico array de triangulos (o buffer de triangulos e compartilhado).
+// ranges[i] = { start, end (exclusivo), min, max } com a bounding box do proprio arquivo,
+// prontos para montar `new Mesh(..., 0, ranges[i].start, ranges[i].end)` + setBoundingBox.
+async function loadMeshes(files)
+{
+    let triangles = [];
+    let ranges = [];
+
+    for (let file of files)
+    {
+        let { verticesMesh, triangles: meshTriangles } = await loadMesh(file);
+        let { min, max } = getObjBoundingBox(verticesMesh);
+
+        ranges.push({ start: triangles.length, end: triangles.length + meshTriangles.length, min, max });
+        triangles = triangles.concat(meshTriangles);
+    }
+
+    return { triangles, ranges };
 }
 
 function getObjBoundingBox(vertices)
@@ -369,4 +466,4 @@ async function crateAllScenesList()
     return sceneList;
 }
 
-export { getGPU, getCanvas, getComputeBuffer, getComputeBufferLayout, load, getModule, getRenderPipeline, readObj, timer, getObjBoundingBox, RGBToInt, IntToRGB, RGBToHex, loadMesh, crateAllScenesList, getSpheresRandom };
+export { getGPU, getCanvas, getComputeBuffer, getComputeBufferLayout, load, getModule, getRenderPipeline, readObj, timer, getObjBoundingBox, RGBToInt, IntToRGB, RGBToHex, loadMesh, loadMeshes, crateAllScenesList, getSpheresRandom };

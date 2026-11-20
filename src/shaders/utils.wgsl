@@ -37,19 +37,32 @@ fn rgb_to_int(c: vec4f) -> i32
   return r | g | b;
 }
 
+// Teste raio x AABB (slab method). Serve como "early-out" das malhas: se o raio
+// nao atinge a caixa que envolve a malha, nenhum triangulo precisa ser testado.
+// t_max descarta caixas que estao mais longe que o objeto ja encontrado.
+fn AABB_intersect_max(r: ray, boxMin: vec3f, boxMax: vec3f, t_max: f32) -> bool
+{
+  // componentes ~0 da direcao viram um valor minusculo (evita 0 * infinito = NaN)
+  let dir = select(r.direction, vec3f(1.0e-8), abs(r.direction) < vec3f(1.0e-8));
+  let inv = 1.0 / dir;
+
+  // pequena folga para nao perder raios que raspam na caixa por erro de ponto flutuante
+  let pad = vec3f(1.0e-4);
+  let tMin = ((boxMin - pad) - r.origin) * inv;
+  let tMax = ((boxMax + pad) - r.origin) * inv;
+
+  let t1 = min(tMin, tMax);
+  let t2 = max(tMin, tMax);
+
+  let tNear = max(max(t1.x, t1.y), t1.z);
+  let tFar = min(min(t2.x, t2.y), t2.z);
+
+  return tFar >= tNear && tFar > 0.0 && tNear <= t_max;
+}
+
 fn AABB_intersect(r: ray, boxMin: vec3f, boxMax: vec3f) -> bool
 {
-  var tMin = (boxMin - r.origin) / r.direction;
-  var tMax = (boxMax - r.origin) / r.direction;
-
-  var t1 = min(tMin, tMax);
-  var t2 = max(tMin, tMax);
-
-  var tNear = max(max(t1.x, t1.y), t1.z);
-  var tFar = min(min(t2.x, t2.y), t2.z);
-
-  var hit = tFar >= tNear && tFar > 0.0;
-  return hit;
+  return AABB_intersect_max(r, boxMin, boxMax, 1.0e30);
 }
 
 fn quaternion_from_euler(euler: vec3f) -> vec4f

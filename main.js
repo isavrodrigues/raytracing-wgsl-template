@@ -1,11 +1,12 @@
 import { getGPU, getCanvas, getComputeBuffer, getComputeBufferLayout, getModule, getRenderPipeline, RGBToInt, timer, RGBToHex, crateAllScenesList } from "./src/util.js";
-import { Sphere, Quad, Box, Triangle, Mesh } from "./src/objects.js";
+import { Sphere, Quad, Box, Cylinder, Triangle, Mesh } from "./src/objects.js";
 import { getAvailableScene } from "./src/scenes.js";
 
 // arrays
 let spheres = [];
 let quads = [];
 let boxes = [];
+let cylinders = [];
 let triangles = [];
 let meshes = [];
 
@@ -14,12 +15,18 @@ const THREAD_COUNT = 16;
 const MAX_SPHERES = 70;
 const MAX_QUADS = 10;
 const MAX_BOXES = 20;
-const MAX_TRIANGLES = 1000;
+const MAX_CYLINDERS = 10;
+const MAX_TRIANGLES = 4000;
 const MAX_MESHES = 3;
+
+// A struct `mesh` do WGSL ocupa 124 bytes (7 vec4 + 3 f32); o stride do array em um storage
+// buffer e arredondado para o alinhamento da struct (16) => 128 bytes = 32 floats por mesh.
+const MESH_STRIDE_FLOATS = 32;
 
 let sphereTemplate = new Sphere([0.0, 0.1, -1.5], [0.4, 0.9, 0.8], 0.5, [0.0, 0.0, 0.0, 0.0]);
 let quadTemplate = new Quad([-1.0, -1.0, 0.0, 0.0], [0.0, 0.0, -2.0, 0.0], [0.0, 2.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]);
 let boxTemplate = new Box([0.0, 0.0, -2.0], [1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [0.0, 0.0, 0.0, 0.0]);
+let cylinderTemplate = new Cylinder([0.0, 0.0, -2.0], [1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [0.4, 0.6], [0.0, 0.0, 0.0, 0.0]);
 let triangleTemplate = new Triangle([0.0, 0.0, -2.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]);
 let meshTemplate = new Mesh([0.0, 0.0, -2.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], 0, 0, 0);
 
@@ -58,6 +65,7 @@ const uniforms = {
     lookatz: -4, // 25
     debugShowLookAt: 0, // 26
     meshCount: meshes.length, // 27
+    cylinderCount: cylinders.length, // 28
 }
 
 const uniformsCount = Object.keys(uniforms).length;
@@ -86,10 +94,13 @@ const quadsBuffer = await getComputeBuffer(gpu, quadsBufferSize, GPUBufferUsage.
 const boxesBufferSize = (sizes.vec4 * 5) * MAX_BOXES;
 const boxesBuffer = await getComputeBuffer(gpu, boxesBufferSize, GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE);
 
+const cylindersBufferSize = (sizes.vec4 * 5) * MAX_CYLINDERS;
+const cylindersBuffer = await getComputeBuffer(gpu, cylindersBufferSize, GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE);
+
 const trianglesBufferSize = (sizes.vec4 * 3) * MAX_TRIANGLES;
 const trianglesBuffer = await getComputeBuffer(gpu, trianglesBufferSize, GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE);
 
-const meshesBufferSize = (sizes.vec4 * 7 + 3 * sizes.f32) * MAX_MESHES;
+const meshesBufferSize = (MESH_STRIDE_FLOATS * sizes.f32) * MAX_MESHES;
 const meshesBuffer = await getComputeBuffer(gpu, meshesBufferSize, GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE);
 
 const frameBuffers = [{ buffer: frameBuffer, type: "storage" }, { buffer: rayTraceFrameBuffer, type: "storage" }];
@@ -103,7 +114,8 @@ const objectBuffers = [
     { buffer: quadsBuffer, type: "storage" }, 
     { buffer: boxesBuffer, type: "storage" }, 
     { buffer: trianglesBuffer, type: "storage" }, 
-    { buffer: meshesBuffer, type: "storage" }
+    { buffer: meshesBuffer, type: "storage" },
+    { buffer: cylindersBuffer, type: "storage" }
 ];
 
 // bind group layout
@@ -139,9 +151,10 @@ scenesFolder.add({ NewScene: () => {
     spheres = [new Sphere([0, -1001, 0], [0.5, 0.5, 0.5], 1000, [0.9, 0.0, 0.6, 0.0]), new Sphere([0.0, 0.3, -5], [0.8, 0.1, 0.2], 1.3, [0.0, 0.001, 0.0, 0.0])];
     quads = [];
     boxes = [];
+    cylinders = [];
     meshes = [];
     triangles = [];
-    
+
     generateBackgroundColor([1.0, 1.0, 1.0], [0.5, 0.7, 1.0]);
     writeBuffers();
     writeUniforms();
@@ -275,6 +288,14 @@ function refreshObjectGUI(template, objectList, parentFolder, folder, startIndex
                     folderVariable.close();
                     break;
 
+                case "size":
+                    // so o cilindro tem `size`: [raio, metade da altura]
+                    folderVariable.add(objectList[i].size, "0").name("Radius").step(0.01).listen();
+                    folderVariable.add(objectList[i].size, "1").name("Half Height").step(0.01).listen();
+
+                    folderVariable.close();
+                    break;
+
                 default:
                     if (lengthOfVariable == 0)
                     {
@@ -308,6 +329,7 @@ function refreshObjectsGUI(startIndex = 0, rebuild = false)
     refreshObjectGUI(sphereTemplate, spheres, objectsFolder, null, startIndex);
     refreshObjectGUI(quadTemplate, quads, objectsFolder, null, startIndex);
     refreshObjectGUI(boxTemplate, boxes, objectsFolder, null, startIndex);
+    refreshObjectGUI(cylinderTemplate, cylinders, objectsFolder, null, startIndex);
     refreshObjectGUI(meshTemplate, meshes, objectsFolder, null, startIndex, false);
 }
 
@@ -335,8 +357,15 @@ function printCurrentScene()
         funcString += `\n\t\tnew Box([${boxes[i].center[0]}, ${boxes[i].center[1]}, ${boxes[i].center[2]}, ${boxes[i].center[3]}], [${boxes[i].color[0]}, ${boxes[i].color[1]}, ${boxes[i].color[2]}], [${boxes[i].rotation[0]}, ${boxes[i].rotation[1]}, ${boxes[i].rotation[2]}, ${boxes[i].rotation[3]}], [${boxes[i].radius[0]}, ${boxes[i].radius[1]}, ${boxes[i].radius[2]}, ${boxes[i].radius[3]}], [${boxes[i].material[0]}, ${boxes[i].material[1]}, ${boxes[i].material[2]}, ${boxes[i].material[3]}]), `;
     }
 
+    funcString += "\n\t];\n\n\tlet cylinders = [";
+
+    for (let i = 0; i < cylinders.length; i++)
+    {
+        funcString += `\n\t\tnew Cylinder([${cylinders[i].center[0]}, ${cylinders[i].center[1]}, ${cylinders[i].center[2]}], [${cylinders[i].color[0]}, ${cylinders[i].color[1]}, ${cylinders[i].color[2]}], [${cylinders[i].rotation[0]}, ${cylinders[i].rotation[1]}, ${cylinders[i].rotation[2]}], [${cylinders[i].size[0]}, ${cylinders[i].size[1]}], [${cylinders[i].material[0]}, ${cylinders[i].material[1]}, ${cylinders[i].material[2]}, ${cylinders[i].material[3]}]), `;
+    }
+
     funcString += "\n\t];\n";
-    funcString += "\n\treturn {\n\t\tspheres : spheres,\n\t\tquads : quads,\n\t\tboxes : boxes,\n\t\ttriangles: [],\n\t\tmeshes: [],\n\t\tbackgroundColor1 : [" + backgroundColor1.object.r + ", " + backgroundColor1.object.g + ", " + backgroundColor1.object.b + "],\n\t\tbackgroundColor2 : [" + backgroundColor2.object.r + ", " + backgroundColor2.object.g + ", " + backgroundColor2.object.b + "],\n\t\tfocusDistance: " + uniforms.focusDistance + ",\n\t\tfocusAngle: " + uniforms.focusAngle + ",\n\t\tsunIntensity: " + uniforms.sunIntensity + ",\n\t\tsamplesPerPixel: " + uniforms.samplesPerPixel + ",\n\t\tmaxBounces: " + uniforms.maxBounces + "\n\t};";
+    funcString += "\n\treturn {\n\t\tspheres : spheres,\n\t\tquads : quads,\n\t\tboxes : boxes,\n\t\tcylinders : cylinders,\n\t\ttriangles: [],\n\t\tmeshes: [],\n\t\tbackgroundColor1 : [" + backgroundColor1.object.r + ", " + backgroundColor1.object.g + ", " + backgroundColor1.object.b + "],\n\t\tbackgroundColor2 : [" + backgroundColor2.object.r + ", " + backgroundColor2.object.g + ", " + backgroundColor2.object.b + "],\n\t\tfocusDistance: " + uniforms.focusDistance + ",\n\t\tfocusAngle: " + uniforms.focusAngle + ",\n\t\tsunIntensity: " + uniforms.sunIntensity + ",\n\t\tsamplesPerPixel: " + uniforms.samplesPerPixel + ",\n\t\tmaxBounces: " + uniforms.maxBounces + "\n\t};";
     funcString += "\n}\n";
     console.log(funcString);
 }
@@ -411,8 +440,9 @@ function handleAccumulate(accumulate, timeAccumulate = true)
 async function getScene(index)
 {
     let bg1, bg2, focusDistance, focusAngle, sunIntensity, samplesPerPixel, maxBounces;
-    ({spheres : spheres, quads : quads, boxes : boxes, 
-        triangles: triangles, meshes: meshes, backgroundColor1 : bg1, 
+    // `cylinders` e opcional: cenas que nao definem a chave ficam com a lista vazia
+    ({spheres : spheres, quads : quads, boxes : boxes, cylinders : cylinders = [],
+        triangles: triangles, meshes: meshes, backgroundColor1 : bg1,
         backgroundColor2 : bg2, focusDistance: focusDistance, focusAngle: 
         focusAngle, sunIntensity: sunIntensity, samplesPerPixel: samplesPerPixel, maxBounces: maxBounces} = await getAvailableScene(index, availableScenes));
     
@@ -447,7 +477,8 @@ function writeUniforms()
     uniforms.boxCount = boxes.length;
     uniforms.trianglesCount = triangles.length;
     uniforms.meshCount = meshes.length;
-    
+    uniforms.cylinderCount = cylinders.length;
+
     var uniformData = new Float32Array(uniformsBufferSize / sizes.f32);
     var offset = 0;
 
@@ -459,19 +490,27 @@ function writeUniforms()
     gpu.queue.writeBuffer(uniformsBuffer, 0, uniformData);
 }
 
-function writeBuffer(buffer, size, objectList)
+// strideFloats > 0: cada objeto comeca em i * strideFloats (padding no fim de cada objeto),
+// para casar com o stride do array no WGSL (ex.: mesh = 124 bytes de dados, stride de 128).
+function writeBuffer(buffer, size, objectList, strideFloats = 0)
 {
+    // lista vazia: nada a escrever (a quantidade de objetos vai nos uniforms)
     if (objectList.length == 0)
     {
         return;
     }
-    
+
     var objectData = new Float32Array(size / sizes.f32);
     var offset = 0;
 
     var variables = Object.keys(objectList[0]);
     for (let i = 0; i < objectList.length; i++)
     {
+        if (strideFloats > 0)
+        {
+            offset = i * strideFloats;
+        }
+
         for (let j = 1; j < variables.length; j++)
         {
             let lengthOfVariable = 0;
@@ -508,8 +547,11 @@ function writeBuffers()
     // boxes
     writeBuffer(boxesBuffer, boxesBufferSize, boxes);
 
-    // meshes
-    writeBuffer(meshesBuffer, meshesBufferSize, meshes);
+    // cylinders
+    writeBuffer(cylindersBuffer, cylindersBufferSize, cylinders);
+
+    // meshes (stride de 128 bytes)
+    writeBuffer(meshesBuffer, meshesBufferSize, meshes, MESH_STRIDE_FLOATS);
 
     // triangles
     writeBuffer(trianglesBuffer, trianglesBufferSize, triangles);

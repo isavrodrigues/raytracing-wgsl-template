@@ -29,6 +29,9 @@ const FRAC_2_PI = 1.5707964f;
 @group(2) @binding(4)
   var<storage, read_write> meshb : array<mesh>;
 
+@group(2) @binding(5)
+  var<storage, read_write> cylindersb : array<cylinder>;
+
 struct ray {
   origin : vec3f,
   direction : vec3f,
@@ -73,6 +76,16 @@ struct mesh {
   show_bb : f32,
   start : f32,
   end : f32,
+};
+
+// cilindro: center.xyz = centro, size.x = raio, size.y = metade da altura (eixo Y local),
+// rotation.xyz = angulos de Euler (mesma convencao das caixas)
+struct cylinder {
+  center : vec4f,
+  size : vec4f,
+  rotation : vec4f,
+  color : vec4f,
+  material : vec4f,
 };
 
 struct material_behaviour {
@@ -151,13 +164,19 @@ fn envoriment_color(direction: vec3f, color1: vec3f, color2: vec3f) -> vec3f
   return col;
 }
 
-fn check_ray_collision(r: ray, max: f32) -> hit_record
+// Procura o objeto mais proximo atingido pelo raio (entre RAY_TMIN e t_max).
+// Caixas, cilindros e malhas podem estar rotacionados: em vez de girar o objeto,
+// giramos o RAIO para o referencial local do objeto, fazemos o teste la, e depois
+// trazemos a normal de volta para o mundo. O ponto de impacto e sempre calculado
+// com o raio original (ray_at(r, t)), ja que t e o mesmo nos dois referenciais.
+fn check_ray_collision(r: ray, t_max: f32) -> hit_record
 {
   var spheresCount = i32(uniforms[19]);
   var quadsCount = i32(uniforms[20]);
   var boxesCount = i32(uniforms[21]);
   var trianglesCount = i32(uniforms[22]);
   var meshCount = i32(uniforms[27]);
+  var cylindersCount = i32(uniforms[28]);
 
   var record = hit_record(RAY_TMAX, vec3f(0.0), vec3f(0.0), vec4f(0.0), vec4f(0.0), false, false);
   var closest = record;
@@ -165,7 +184,7 @@ fn check_ray_collision(r: ray, max: f32) -> hit_record
   for (var i = 0; i < spheresCount; i = i + 1)
   {
     var candidate = record;
-    hit_sphere(spheresb[i].transform.xyz, spheresb[i].transform.w, r, &candidate, min(max, closest.t));
+    hit_sphere(spheresb[i].transform.xyz, spheresb[i].transform.w, r, &candidate, min(t_max, closest.t));
     if (candidate.hit_anything)
     {
       candidate.object_color = spheresb[i].color;
@@ -177,7 +196,7 @@ fn check_ray_collision(r: ray, max: f32) -> hit_record
   for (var i = 0; i < quadsCount; i = i + 1)
   {
     var candidate = record;
-    hit_quad(r, quadsb[i].Q, quadsb[i].u, quadsb[i].v, &candidate, min(max, closest.t));
+    hit_quad(r, quadsb[i].Q, quadsb[i].u, quadsb[i].v, &candidate, min(t_max, closest.t));
     if (candidate.hit_anything)
     {
       candidate.object_color = quadsb[i].color;
@@ -186,15 +205,110 @@ fn check_ray_collision(r: ray, max: f32) -> hit_record
     }
   }
 
+  // caixas (com rotacao)
   for (var i = 0; i < boxesCount; i = i + 1)
   {
+    let center = boxesb[i].center.xyz;
+    let q = quaternion_from_euler(boxesb[i].rotation.xyz);
+    let local_ray = rotate_ray_quaternion(r, center, q_conjugate(q));
+
     var candidate = record;
-    hit_box(r, boxesb[i].center.xyz, boxesb[i].radius.xyz, &candidate, min(max, closest.t));
+    hit_box(local_ray, center, boxesb[i].radius.xyz, &candidate, min(t_max, closest.t));
     if (candidate.hit_anything)
     {
+      candidate.p = ray_at(r, candidate.t);
+      candidate.normal = normalize(rotate_vector(candidate.normal, q));
       candidate.object_color = boxesb[i].color;
       candidate.object_material = boxesb[i].material;
       closest = candidate;
+    }
+  }
+
+  // cilindros (com rotacao)
+  for (var i = 0; i < cylindersCount; i = i + 1)
+  {
+    let center = cylindersb[i].center.xyz;
+    let q = quaternion_from_euler(cylindersb[i].rotation.xyz);
+    let local_ray = rotate_ray_quaternion(r, center, q_conjugate(q));
+
+    var candidate = record;
+    hit_cylinder(local_ray, center, cylindersb[i].size.x, cylindersb[i].size.y, &candidate, min(t_max, closest.t));
+    if (candidate.hit_anything)
+    {
+      candidate.p = ray_at(r, candidate.t);
+      candidate.normal = normalize(rotate_vector(candidate.normal, q));
+      candidate.object_color = cylindersb[i].color;
+      candidate.object_material = cylindersb[i].material;
+      closest = candidate;
+    }
+  }
+
+  // malhas de triangulos: mundo = R * (escala * local) + transform
+  for (var i = 0; i < meshCount; i = i + 1)
+  {
+    // evita divisao por zero se alguma escala for 0
+    let scale = select(meshb[i].scale.xyz, vec3f(1.0e-6), abs(meshb[i].scale.xyz) < vec3f(1.0e-6));
+    let q = quaternion_from_euler(meshb[i].rotation.xyz);
+    let inv_q = q_conjugate(q);
+
+    // raio no referencial da malha: translada, gira de volta e desfaz a escala.
+    // A direcao nao e renormalizada, entao t e o mesmo no mundo e no referencial local.
+    let local_ray = ray(
+      rotate_vector(r.origin - meshb[i].transform.xyz, inv_q) / scale,
+      rotate_vector(r.direction, inv_q) / scale
+    );
+
+    var best_t = min(t_max, closest.t);
+
+    // early-out: se o raio nao toca a bounding box, nao testa nenhum triangulo
+    if (!AABB_intersect_max(local_ray, meshb[i].min.xyz, meshb[i].max.xyz, best_t))
+    {
+      continue;
+    }
+
+    var mesh_hit = record;
+
+    let first = i32(meshb[i].start);
+    let last = min(i32(meshb[i].end), trianglesCount);
+    for (var k = first; k < last; k = k + 1)
+    {
+      var candidate = record;
+      hit_triangle(local_ray, trianglesb[k].v0.xyz, trianglesb[k].v1.xyz, trianglesb[k].v2.xyz, &candidate, best_t);
+      if (candidate.hit_anything)
+      {
+        mesh_hit = candidate;
+        best_t = candidate.t;
+      }
+    }
+
+    // debug: desenha a bounding box da malha (show_bb > 0)
+    if (meshb[i].show_bb > 0.5)
+    {
+      let bb_min = meshb[i].min.xyz;
+      let bb_max = meshb[i].max.xyz;
+      var candidate = record;
+      hit_box(local_ray, 0.5 * (bb_min + bb_max), 0.5 * (bb_max - bb_min), &candidate, best_t);
+      if (candidate.hit_anything)
+      {
+        mesh_hit = candidate;
+        best_t = candidate.t;
+      }
+    }
+
+    if (mesh_hit.hit_anything)
+    {
+      // normal local -> mundo: R * (n / escala) (a normal nao se transforma como um ponto)
+      var world_normal = normalize(rotate_vector(mesh_hit.normal / scale, q));
+      if (dot(world_normal, r.direction) > 0.0)
+      {
+        world_normal = -world_normal;
+      }
+
+      mesh_hit.p = ray_at(r, mesh_hit.t);
+      mesh_hit.normal = world_normal;
+      mesh_hit.object_color = meshb[i].color;
+      mesh_hit.object_material = meshb[i].material;
+      closest = mesh_hit;
     }
   }
 
