@@ -30,7 +30,8 @@ aperte `CTRL + Shift + P` e selecione `Live Server`. Precisa de um navegador com
 ### Controles
 Qualquer parâmetro pode ser alterado pelo GUI ao lado (clique no valor e use o scroll para mudar de forma suave).
 Para mover a câmera use `W A S D Q E`; para girar use as setas e `X Z`.
-Os botões da pasta *Scene* permitem trocar de cena, salvar a imagem e imprimir a cena atual como código (`PrintScene`).
+Na pasta *Scene*, o menu *Scene* troca de cena e os botões reiniciam a cena/câmera, salvam a imagem e imprimem a cena atual
+como código no console (`PrintScene`; esferas, quads, caixas e cilindros — as malhas `.obj` não são exportadas).
 
 ### O que foi implementado
 
@@ -80,11 +81,14 @@ Existe um script que renderiza todas as cenas em um Chromium *headless* usando o
 PNGs, reportando erros de compilação do WGSL:
 
 ```
-npm install --prefix tools/.cache lil-gui@0.17 gl-matrix@2.8.1 pngjs   # uma vez (o script imprime o comando se faltar)
+# uma vez (o script imprime este comando se faltar algo):
+mkdir -p tools/.cache && cd tools/.cache && npm init -y && npm i lil-gui@0.17.0 gl-matrix@2.8.1 pngjs@7.0.0 playwright && npx playwright install chromium && cd ../..
+
 node tools/render-scenes.cjs [--scenes Basic,Bunny] [--rez 256] [--frames 12] [--out tools/out]
 ```
 A saída (`tools/out/*.png`, `montage.png`, `index.html`) não é versionada. Sai com código ≠ 0 se alguma cena der erro.
-Requer o Playwright com Chromium instalado.
+Como o render é em software, todas as cenas levam alguns minutos. Use `CHROMIUM_PATH=/caminho/do/chrome` para usar um
+Chromium/Chrome já instalado.
 
 ### Estrutura
 - `main.js` — inicialização WebGPU, buffers, GUI, câmera e loop de render.

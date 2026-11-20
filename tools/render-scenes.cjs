@@ -24,8 +24,9 @@
  * EXIT CODE  0 = every scene rendered without errors, 1 = at least one scene had errors / timed out / init failed.
  *
  * ONE-TIME SETUP (the only npm deps live in the git-ignored tools/.cache):
- *   mkdir -p tools/.cache && cd tools/.cache && npm init -y && npm i lil-gui@0.17.0 gl-matrix@2.8.1 pngjs@7.0.0
- *   (the script prints this hint if the files are missing). Playwright + Chromium are pre-installed on the box.
+ *   mkdir -p tools/.cache && cd tools/.cache && npm init -y && npm i lil-gui@0.17.0 gl-matrix@2.8.1 pngjs@7.0.0 playwright && npx playwright install chromium
+ *   (the script prints this hint if something is missing). Set CHROMIUM_PATH to use an existing Chromium/Chrome
+ *   binary instead of Playwright's own download.
  *
  * HOW IT WORKS / ASSUMPTIONS ABOUT THE PROJECT
  *   - CDN scripts from index.html (lil-gui, gl-matrix, mathjs) are served from tools/.cache via page.route.
@@ -37,14 +38,14 @@
  *     parsed from the getModule(gpu, [...]) call in main.js).
  *
  * TWO HARNESS-ONLY WORKAROUNDS (neither touches the project files; both are monkey-patches in INIT_SCRIPT)
- *   1. Canvas: in this container (headless Chrome 153 + SwiftShader) GPUCanvasContext.getCurrentTexture() breaks
+ *   1. Canvas: with headless Chrome + SwiftShader (software WebGPU) GPUCanvasContext.getCurrentTexture() breaks
  *      Dawn ("A valid external Instance reference no longer exists" -> onSubmittedWorkDone() rejects -> render loop
  *      dies). main.js therefore renders into an offscreen texture and the harness reads that back. Output pixels are
  *      identical to what the canvas would show (same render pipeline), only the compositor is bypassed.
  *   2. Accumulation: SwiftShader frames take 0.1 - 1.7 s, far more than the 400 ms accumulation-reset timer in
  *      main.js, so a new scene would be summed on top of the previous scene's image. The first frame after each scene
  *      load is forced to shouldAccumulate = 0, like on a fast GPU. (Without this, images are contaminated.)
- *   Typical run: ~2 min for all scenes at --rez 256 --frames 12; single simple scene ~3 s.
+ *   Typical run: 2-5 min for all scenes at --rez 256 --frames 12 (software rendering); a single simple scene ~3 s.
  */
 'use strict';
 
@@ -80,21 +81,37 @@ function parseArgs(argv)
 }
 
 // ------------------------------------------------------------------------------------------ local deps
+const INSTALL_HINT = 'mkdir -p tools/.cache && cd tools/.cache && npm init -y && npm i lil-gui@0.17.0 gl-matrix@2.8.1 pngjs@7.0.0 playwright && npx playwright install chromium';
+
 function need(rel)
 {
     const p = path.join(CACHE, rel);
     if (!fs.existsSync(p))
     {
-        console.error(`missing ${p}\nrun:  mkdir -p tools/.cache && cd tools/.cache && npm init -y && npm i lil-gui@0.17.0 gl-matrix@2.8.1 pngjs@7.0.0`);
+        console.error(`missing ${p}\nrun:  ${INSTALL_HINT}`);
         process.exit(2);
     }
     return p;
 }
 
+// Playwright: primeiro o de tools/.cache, depois o instalado globalmente / no projeto
+function loadPlaywright()
+{
+    try
+    {
+        return require(require.resolve('playwright', { paths: [CACHE, __dirname] }));
+    }
+    catch (e)
+    {
+        console.error(`playwright not found.\nrun:  ${INSTALL_HINT}`);
+        process.exit(2);
+    }
+}
+
 const LIL_GUI = fs.readFileSync(need('lil-gui/dist/lil-gui.umd.min.js'));
 const GL_MATRIX = fs.readFileSync(need('gl-matrix/dist/gl-matrix-min.js'));
 const { PNG } = require(need('pngjs'));
-const { chromium } = require('playwright');
+const { chromium } = loadPlaywright();
 
 const CHROME_ARGS = [
     '--no-sandbox',
@@ -263,7 +280,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const server = await startServer(args.rez, args.port);
     const url = `http://127.0.0.1:${server.address().port}/index.html`;
 
-    const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium', headless: true, args: CHROME_ARGS });
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined, headless: true, args: CHROME_ARGS });
     const context = await browser.newContext({ viewport: { width: Math.max(1300, args.rez + 400), height: Math.max(900, args.rez + 150) }, deviceScaleFactor: 1 });
 
     // serve the CDN scripts locally, block every other external request

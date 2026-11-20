@@ -141,7 +141,8 @@ performanceFolder.add(performanceStats, 'fps').name("fps").listen().disable();
 performanceFolder.add(performanceStats, 'ms').name("ms").listen().disable();
 
 let scenesFolder = gui.addFolder("Scene");
-const scenesNames = { name: "Spheres"};
+// o valor do dropdown é o índice da cena (0 = "Spheres"); getScene() recebe esse índice
+const scenesNames = { name: 0 };
 
 scenesFolder.add(scenesNames, 'name', availableScenes).name("Scene").listen().onChange( function() { getScene(scenesNames.name); });
 var cameraVelocityConstant = 5.0;
@@ -229,19 +230,26 @@ background.addColor( backgroundColor2, 'BGC2' ).onChange( function() {
 
 let objectsFolder = gui.addFolder("Objects");
 
-function refreshObjectGUI(template, objectList, parentFolder, folder, startIndex, hasButtons = true)
+function refreshObjectGUI(template, objectList, parentFolder, folder, startIndex, hasButtons = true, maxObjects = Infinity)
 {
     let objectFolder = folder;
     if (!objectFolder)
     {
         objectFolder = parentFolder.addFolder(template.name + "(s)");
-        
+
         if (hasButtons)
         {
             objectFolder.add({ AddObject: () => {
+                // o buffer da GPU tem tamanho fixo (MAX_*): não deixa passar do limite
+                if (objectList.length >= maxObjects)
+                {
+                    console.warn(`Limite de ${maxObjects} ${template.name}(s) atingido (buffer da GPU)`);
+                    return;
+                }
+
                 let copyTemplate = JSON.parse(JSON.stringify(template));
                 objectList.push(copyTemplate);
-                refreshObjectGUI(template, objectList, parentFolder, objectFolder, objectList.length - 1);
+                refreshObjectGUI(template, objectList, parentFolder, objectFolder, objectList.length - 1, hasButtons, maxObjects);
                 handleAccumulate(false);
                 writeBuffers();
             }}, 'AddObject');
@@ -326,10 +334,10 @@ function refreshObjectsGUI(startIndex = 0, rebuild = false)
         objectsFolder = gui.addFolder("Objects");
     }
 
-    refreshObjectGUI(sphereTemplate, spheres, objectsFolder, null, startIndex);
-    refreshObjectGUI(quadTemplate, quads, objectsFolder, null, startIndex);
-    refreshObjectGUI(boxTemplate, boxes, objectsFolder, null, startIndex);
-    refreshObjectGUI(cylinderTemplate, cylinders, objectsFolder, null, startIndex);
+    refreshObjectGUI(sphereTemplate, spheres, objectsFolder, null, startIndex, true, MAX_SPHERES);
+    refreshObjectGUI(quadTemplate, quads, objectsFolder, null, startIndex, true, MAX_QUADS);
+    refreshObjectGUI(boxTemplate, boxes, objectsFolder, null, startIndex, true, MAX_BOXES);
+    refreshObjectGUI(cylinderTemplate, cylinders, objectsFolder, null, startIndex, true, MAX_CYLINDERS);
     refreshObjectGUI(meshTemplate, meshes, objectsFolder, null, startIndex, false);
 }
 

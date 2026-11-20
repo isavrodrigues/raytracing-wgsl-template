@@ -363,7 +363,15 @@ fn dielectric(normal : vec3f, r_direction: vec3f, refraction_index: f32, frontfa
     direction = refract(unit_direction, normal, ratio);
   }
 
-  return material_behaviour(true, normalize(direction + fuzz * random_sphere));
+  // refract() pode devolver o vetor nulo em casos degenerados (e o fuzz pode cancelá-lo):
+  // normalizar (0,0,0) geraria NaN, que ficaria preso no acumulador. Nesse caso, reflete.
+  let scattered = direction + fuzz * random_sphere;
+  if (dot(scattered, scattered) < 1e-8)
+  {
+    return material_behaviour(true, reflect(unit_direction, normal));
+  }
+
+  return material_behaviour(true, normalize(scattered));
 }
 
 fn emmisive(color: vec3f, light: f32) -> material_behaviour
@@ -411,8 +419,6 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
 
     behaviour = lambertian(record.normal, record.object_material.y, random_sphere, rng_state);
 
-    // specular = probabilidade deste raio refletir de forma especular (metal_reflect)
-    // em vez de espalhar de forma difusa (lambertiano)
     if (smoothness < 0.0)
     {
       // smoothness < 0 = dielétrico (vidro). specular = índice de refração, absorption = fuzz
@@ -420,6 +426,8 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
     }
     else if (smoothness > 0.0 && rng_next_float(rng_state) < specular)
     {
+      // specular = probabilidade deste raio refletir de forma especular (metal_reflect)
+      // em vez de espalhar de forma difusa (lambertiano)
       // absorption controla o fuzz: 0 = espelho perfeito, maior = mais fosco
       let metallic = metal(record.normal, r_.direction, record.object_material.y, random_sphere);
       let metal_reflect = normalize(mix(behaviour.direction, metallic.direction, smoothness));
@@ -485,8 +493,10 @@ fn render(@builtin(global_invocation_id) id : vec3u)
     // should_accumulate = 0 (câmera/cena mudou) zera a soma e recomeça a contagem.
     var should_accumulate = uniforms[3];
     var previous = rtfb[map_fb];
-    var accumulated_color = previous.xyz * should_accumulate + color;
-    var weight = previous.w * should_accumulate + 1.0;
+    // select (e não multiplicação) para que um NaN/inf antigo seja realmente descartado ao reiniciar (NaN * 0 = NaN)
+    let keep = should_accumulate > 0.5;
+    var accumulated_color = select(vec3f(0.0), previous.xyz, keep) + color;
+    var weight = select(0.0, previous.w, keep) + 1.0;
 
     rtfb[map_fb] = vec4(accumulated_color, weight);
 

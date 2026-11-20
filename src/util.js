@@ -436,7 +436,7 @@ async function getFunctionsInFile(filepath) {
 
     if (functionNames.length === 0)
     {
-        console.logWarning("No functions found in file: " + filepath);
+        console.warn("No functions found in file: " + filepath);
     }
 
     return functionNames;
